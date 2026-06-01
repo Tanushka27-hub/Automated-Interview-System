@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Automated AI Interview System for managing candidate interviews">
+  <title>Automated AI Interview System</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 20px;
+      background-color: #f5f6fa;
+      color: #2c3e50;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .upper-half {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    .upper-half > div {
+      flex: 1;
+      min-width: 300px;
+    }
+    .lower-half {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .stats, .upload, .manual, .results {
+      background: white;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .stats:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+      cursor: pointer;
+    }
+    .stats div {
+      margin-bottom: 12px;
+      padding: 12px;
+      background: #e9ecef;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 16px;
+      transition: background 0.2s;
+    }
+    .stats div:hover {
+      background: #dfe3e8;
+    }
+    h1 {
+      color: #2c3e50;
+      text-align: center;
+      font-size: 32px;
+      margin-bottom: 16px;
+    }
+    h2 {
+      margin-top: 0;
+      color: #2c3e50;
+      font-size: 24px;
+    }
+    button, input[type="submit"] {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background 0.2s, transform 0.1s;
+    }
+    button:hover, input[type="submit"]:hover {
+      background: #0056b3;
+      transform: translateY(-2px);
+    }
+    button:disabled, input[type="submit"]:disabled {
+      background: #6c757d;
+      cursor: not-allowed;
+    }
+    select, input[type="text"], input[type="file"], input[type="number"] {
+      padding: 10px;
+      margin: 8px 0;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      width: 100%;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    select:focus, input:focus {
+      border-color: #007bff;
+      outline: none;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 16px;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 12px;
+      text-align: left;
+      font-size: 14px;
+    }
+    th {
+      background: #007bff;
+      color: white;
+      font-weight: 600;
+    }
+    tr:nth-child(even) {
+      background: #f9f9f9;
+    }
+    tr:hover {
+      background: #f1f3f5;
+    }
+    .candidate-entry {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .candidate-entry input, .candidate-entry select {
+      flex: 1;
+      min-width: 150px;
+    }
+    .error {
+      color: #dc3545;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .success {
+      color: #28a745;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .last-updated {
+      font-size: 14px;
+      color: #6c757d;
+    }
+    a {
+      color: #007bff;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #333;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 6px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      z-index: 1000;
+    }
+    .toast.show {
+      opacity: 1;
+    }
+    .loading::after {
+      content: '';
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-left: 8px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @media (max-width: 600px) {
+      .candidate-entry {
+        flex-direction: column;
+      }
+      .candidate-entry input, .candidate-entry select, .candidate-entry button {
+        width: 100%;
+      }
+      th, td {
+        font-size: 12px;
+        padding: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Automated AI Interview System</h1>
+    
+    <div class="upper-half">
+      <div class="stats" role="button" aria-label="View interview statistics">
+        <h2>Interview Statistics</h2>
+        <div onclick="filterByStatus('all')" aria-label="Show all candidates">
+          <strong>Total Candidates</strong>
+          <span id="total-candidates">0</span>
+        </div>
+        <div onclick="filterByStatus('Scheduled')" aria-label="Show scheduled candidates">
+          <strong>Interviews Scheduled</strong>
+          <span id="scheduled">0</span>
+        </div>
+        <div onclick="filterByStatus('Interview Completed')" aria-label="Show completed interviews">
+          <strong>Interviews Completed</strong>
+          <span id="completed">0</span>
+        </div>
+        <div onclick="filterByStatus('In Progress')" aria-label="Show interviews in progress">
+          <strong>Interviews In Progress</strong>
+          <span id="in-progress">0</span>
+        </div>
+        <div onclick="filterByStatus('Declined')" aria-label="Show declined candidates">
+          <strong>Candidates Declined</strong>
+          <span id="declined">0</span>
+        </div>
+      </div>
+
+      <div class="upload">
+        <h2>Upload Candidates (Excel/CSV)</h2>
+        <form id="upload-form" enctype="multipart/form-data">
+          <label for="file-upload">Upload Excel/CSV File</label>
+          <input type="file" id="file-upload" accept=".csv,.xlsx,.xls" required aria-describedby="file-format">
+          <p id="file-format">Format: Name, Phone, Language, Method, Department, SubDepartment, Section, Designation (e.g., "John Doe, +919876543210, English, WhatsApp, HR, Recruitment, Sourcing, Assistant Manager")</p>
+          <a href="data:text/csv;charset=utf-8,Name,Phone,Language,Method,Department,SubDepartment,Section,Designation%0AJohn%20Doe,+919876543210,English,WhatsApp,HR,Recruitment,Sourcing,Assistant%20Manager" download="sample.csv">Download Sample CSV</a>
+          <br>
+          <input type="submit" value="Upload and Process" id="upload-submit">
+        </form>
+        <div id="upload-message" class="error" role="alert"></div>
+      </div>
+    </div>
+
+    <div class="lower-half">
+      <div class="manual">
+        <h2>Add Candidate Manually (Max 20)</h2>
+        <div id="candidate-entries">
+          <div class="candidate-entry">
+            <input type="text" placeholder="Name" class="name-input" required aria-label="Candidate name">
+            <input type="text" placeholder="Phone (e.g., +919876543210)" class="phone-input" required aria-label="Candidate phone number">
+            <select class="language-select" required aria-label="Select language">
+              <option value="English">English</option>
+              <option value="Hindi">Hindi</option>
+            </select>
+            <select class="method-select" required aria-label="Select communication method">
+              <option value="whatsapp">WhatsApp</option>
+              <option value="voice">Voice</option>
+            </select>
+            <button type="button" onclick="removeCandidate(this)" aria-label="Remove candidate entry">Remove</button>
+          </div>
+        </div>
+        <button type="button" onclick="addCandidateEntry()" aria-label="Add another candidate">Add Another Candidate</button>
+        <button type="button" onclick="sendManualCandidates()" id="send-manual-btn" aria-label="Send messages or calls">Send Messages/Calls</button>
+        <div id="manual-message" class="error" role="alert"></div>
+      </div>
+
+      <div class="results">
+        <h2>Interview Results</h2>
+        <form id="filter-form">
+          <label for="min-correct">Filter by Minimum Correct Answers</label>
+          <input type="number" id="min-correct" min="0" placeholder="Enter number" aria-label="Minimum correct answers">
+          <input type="submit" value="Apply Filter" aria-label="Apply filter">
+        </form>
+        <p class="last-updated">Last updated: <span id="last-updated">Never</span></p>
+        <table id="results-table" aria-label="Interview results table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Department</th>
+              <th>Sub-Department</th>
+              <th>Section</th>
+              <th>Designation</th>
+              <th>Language</th>
+              <th>Method</th>
+              <th>Status</th>
+              <th>Scheduled Date & Time</th>
+              <th>Answers</th>
+              <th>Correct Answers</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <button type="button" onclick="startInterviews()" id="start-interviews-btn" aria-label="Start interviews">Start Interviews</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+   const serverUrl = window.location.hostname === 'localhost'
+  ? 'http://localhost:3000'
+  : `http://${window.location.hostname}:3000`;
+    let candidates = [];
+
+    // Show toast notification
+    function showToast(message, isError = false) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = `toast show ${isError ? 'error' : 'success'}`;
+      setTimeout(() => {
+        toast.className = 'toast';
+      }, 3000);
+    }
+
+    // Set loading state
+    function setLoading(button, isLoading) {
+      button.disabled = isLoading;
+      button.classList.toggle('loading', isLoading);
+    }
+
+    // Format date and time
+    function formatDateTime(date, time) {
+      if (!date || !time || !date.match(/^\d{4}-\d{2}-\d{2}$/) || !time.match(/^\d{1,2}:\d{2} [AP]M$/)) {
+        return 'N/A';
+      }
+      try {
+        const dateObj = new Date(`${date} ${time.replace(' AM', ':00 AM').replace(' PM', ':00 PM')}`);
+        if (isNaN(dateObj.getTime())) {
+          return 'N/A';
+        }
+        return dateObj.toLocaleString('en-US', {
+          timeZone: 'Asia/Kolkata',
+          dateStyle: 'short',
+          timeStyle: 'short'
+        });
+      } catch (e) {
+        return 'N/A';
+      }
+    }
+
+    // Fetch results and update table and stats
+    async function fetchResults() {
+      try {
+        const response = await fetch(`${serverUrl}/results`);
+        if (!response.ok) throw new Error('Failed to fetch results');
+        candidates = await response.json();
+        updateStats();
+        updateResultsTable();
+      } catch (error) {
+        console.error('Error fetching results:', error);
+        showToast('Error fetching results', true);
+      }
+    }
+
+    // Update statistics
+    function updateStats() {
+      const total = candidates.length;
+      const scheduled = candidates.filter(c => c.status.includes('Scheduled')).length;
+      const completed = candidates.filter(c => c.status === 'Interview Completed').length;
+      const inProgress = candidates.filter(c => c.status === 'In Progress' || c.status === 'Interview Started').length;
+      const declined = candidates.filter(c => c.status === 'Declined').length;
+
+      document.getElementById('total-candidates').textContent = total;
+      document.getElementById('scheduled').textContent = scheduled;
+      document.getElementById('completed').textContent = completed;
+      document.getElementById('in-progress').textContent = inProgress;
+      document.getElementById('declined').textContent = declined;
+    }
+
+    // Update results table with optional status filter
+    function updateResultsTable(minCorrect = 0, statusFilter = 'all') {
+      const tbody = document.querySelector('#results-table tbody');
+      tbody.innerHTML = '';
+      let filteredCandidates = candidates.filter(c => c.score >= minCorrect);
+      if (statusFilter !== 'all') {
+        filteredCandidates = filteredCandidates.filter(c => {
+          if (statusFilter === 'Scheduled') return c.status.includes('Scheduled');
+          if (statusFilter === 'In Progress') return c.status === 'In Progress' || c.status === 'Interview Started';
+          return c.status === statusFilter;
+        });
+      }
+      filteredCandidates.forEach(candidate => {
+        const row = document.createElement('tr');
+        const scheduledDateTime = candidate.status.includes('Scheduled') ? formatDateTime(candidate.interviewDate, candidate.interviewTime) : 'N/A';
+        const answers = candidate.status === 'Interview Started' || candidate.status === 'Interview Completed' ? candidate.totalQuestions : 0;
+        row.innerHTML = `
+          <td>${candidate.name || 'Unknown'}</td>
+          <td>${candidate.phone}</td>
+          <td>${candidate.department}</td>
+          <td>${candidate.subDepartment}</td>
+          <td>${candidate.section}</td>
+          <td>${candidate.designation}</td>
+          <td>${candidate.language || 'Not set'}</td>
+          <td>${candidate.method}</td>
+          <td>${candidate.status}</td>
+          <td>${scheduledDateTime}</td>
+          <td>${answers}</td>
+          <td>${candidate.score}</td>
+        `;
+        tbody.appendChild(row);
+      });
+      document.getElementById('last-updated').textContent = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    }
+
+    // Filter by status
+    function filterByStatus(status) {
+      const minCorrect = parseInt(document.getElementById('min-correct').value) || 0;
+      updateResultsTable(minCorrect, status);
+    }
+
+    // Validate phone number
+    function validatePhone(phone) {
+      return phone.match(/^\+\d{10,15}$/);
+    }
+
+    // Handle file upload
+    document.getElementById('upload-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fileInput = document.getElementById('file-upload');
+      const messageDiv = document.getElementById('upload-message');
+      const submitBtn = document.getElementById('upload-submit');
+      if (!fileInput.files[0]) {
+        messageDiv.textContent = 'Please select a file.';
+        return;
+      }
+
+      setLoading(submitBtn, true);
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      try {
+        const response = await fetch(`${serverUrl}/upload-candidates`, {
+          method: 'POST',
+          body: formData
+        });
+        const result = await response.json();
+        messageDiv.className = response.ok ? 'success' : 'error';
+        messageDiv.textContent = result.message;
+        if (result.errors) {
+          messageDiv.textContent += ': ' + result.errors.join(', ');
+        }
+        showToast(result.message, !response.ok);
+        fileInput.value = '';
+        await fetchResults();
+      } catch (error) {
+        messageDiv.className = 'error';
+        messageDiv.textContent = 'Error uploading file.';
+        showToast('Error uploading file', true);
+        console.error('Upload error:', error);
+      } finally {
+        setLoading(submitBtn, false);
+      }
+    });
+
+    // Add new candidate entry
+    function addCandidateEntry() {
+      const entries = document.getElementById('candidate-entries');
+      if (entries.children.length >= 20) {
+        document.getElementById('manual-message').textContent = 'Maximum 20 candidates allowed.';
+        showToast('Maximum 20 candidates allowed', true);
+        return;
+      }
+      const entry = document.createElement('div');
+      entry.className = 'candidate-entry';
+      entry.innerHTML = `
+        <input type="text" placeholder="Name" class="name-input" required aria-label="Candidate name">
+        <input type="text" placeholder="Phone (e.g., +919876543210)" class="phone-input" required aria-label="Candidate phone number">
+        <select class="language-select" required aria-label="Select language">
+          <option value="English">English</option>
+          <option value="Hindi">Hindi</option>
+        </select>
+        <select class="method-select" required aria-label="Select communication method">
+          <option value="whatsapp">WhatsApp</option>
+          <option value="voice">Voice</option>
+        </select>
+        <button type="button" onclick="removeCandidate(this)" aria-label="Remove candidate entry">Remove</button>
+      `;
+      entries.appendChild(entry);
+      document.getElementById('manual-message').textContent = '';
+    }
+
+    // Remove candidate entry
+    function removeCandidate(button) {
+      const entries = document.getElementById('candidate-entries');
+      if (entries.children.length > 1) {
+        button.parentElement.remove();
+        document.getElementById('manual-message').textContent = '';
+      } else {
+        showToast('At least one candidate entry is required', true);
+      }
+    }
+
+    // Send manual candidates
+    async function sendManualCandidates() {
+      const entries = document.querySelectorAll('.candidate-entry');
+      const messageDiv = document.getElementById('manual-message');
+      const sendBtn = document.getElementById('send-manual-btn');
+      const users = [];
+      let valid = true;
+
+      entries.forEach(entry => {
+        const name = entry.querySelector('.name-input').value.trim();
+        const phone = entry.querySelector('.phone-input').value.trim();
+        const language = entry.querySelector('.language-select').value;
+const method = entry.querySelector('.method-select').value.toLowerCase();
+        if (!name || !phone) {
+          valid = false;
+          messageDiv.textContent = 'All fields are required.';
+          showToast('All fields are required', true);
+          return;
+        }
+        if (!validatePhone(phone)) {
+          valid = false;
+          messageDiv.textContent = 'Invalid phone format. Use + followed by 10-15 digits.';
+          showToast('Invalid phone format', true);
+          return;
+        }
+        users.push({ name, phone, language, method });
+      });
+
+      if (!valid || users.length === 0) return;
+
+      setLoading(sendBtn, true);
+      try {
+        const response = await fetch(`${serverUrl}/send-manual`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(users)
+        });
+        const result = await response.json();
+        messageDiv.className = response.ok ? 'success' : 'error';
+        messageDiv.textContent = result.message;
+        if (result.errors) {
+          messageDiv.textContent += ': ' + result.errors.join(', ');
+        }
+        showToast(result.message, !response.ok);
+        if (response.ok) {
+          document.getElementById('candidate-entries').innerHTML = `
+            <div class="candidate-entry">
+              <input type="text" placeholder="Name" class="name-input" required aria-label="Candidate name">
+              <input type="text" placeholder="Phone (e.g., +919876543210)" class="phone-input" required aria-label="Candidate phone number">
+              <select class="language-select" required aria-label="Select language">
+                <option value="English">English</option>
+                <option value="Hindi">Hindi</option>
+              </select>
+              <select class="method-select" required aria-label="Select communication method">
+                <option value="whatsapp">WhatsApp</option>
+                <option value="voice">Voice</option>
+              </select>
+              <button type="button" onclick="removeCandidate(this)" aria-label="Remove candidate entry">Remove</button>
+            </div>
+          `;
+          await fetchResults();
+        }
+      } catch (error) {
+        messageDiv.className = 'error';
+        messageDiv.textContent = 'Error sending candidates.';
+        showToast('Error sending candidates', true);
+        console.error('Send manual error:', error);
+      } finally {
+        setLoading(sendBtn, false);
+      }
+    }
+
+    // Start interviews
+    async function startInterviews() {
+      const startBtn = document.getElementById('start-interviews-btn');
+      setLoading(startBtn, true);
+      try {
+        const response = await fetch(`${serverUrl}/start-interview`, {
+          method: 'POST'
+        });
+        const result = await response.json();
+        document.getElementById('manual-message').className = response.ok ? 'success' : 'error';
+        document.getElementById('manual-message').textContent = result.message;
+        showToast(result.message, !response.ok);
+        await fetchResults();
+      } catch (error) {
+        document.getElementById('manual-message').className = 'error';
+        document.getElementById('manual-message').textContent = 'Error starting interviews.';
+        showToast('Error starting interviews', true);
+        console.error('Start interviews error:', error);
+      } finally {
+        setLoading(startBtn, false);
+      }
+    }
+
+    // Filter results
+    document.getElementById('filter-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const minCorrect = parseInt(document.getElementById('min-correct').value) || 0;
+      if (minCorrect < 0) {
+        showToast('Minimum correct answers cannot be negative', true);
+        return;
+      }
+      updateResultsTable(minCorrect, 'all');
+    });
+
+    // Real-time phone validation
+    document.getElementById('candidate-entries').addEventListener('input', (e) => {
+      if (e.target.classList.contains('phone-input')) {
+        const messageDiv = document.getElementById('manual-message');
+        if (e.target.value && !validatePhone(e.target.value)) {
+          messageDiv.textContent = 'Invalid phone format. Use + followed by 10-15 digits.';
+          messageDiv.className = 'error';
+        } else {
+          messageDiv.textContent = '';
+        }
+      }
+    });
+
+    // Periodic result fetching
+    setInterval(fetchResults, 30000);
+    fetchResults(); // Initial fetch
+  </script>
+</body>
+</html>
