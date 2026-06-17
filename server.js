@@ -9,25 +9,29 @@ const Papa = require('papaparse');
 const fs = require('fs');
 const schedule = require('node-schedule');
 const moment = require('moment-timezone');
+require('dotenv').config();
 
-const NGROK_URL = 'https://agreeably-garland-jaybird.ngrok-free.dev'; // Updated ngrok URL
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const NGROK_URL = process.env.NGROK_URL;
+
+const NGROK_URL = 'https://agreeably-garland-jaybird.ngrok-free.dev';
+const connectDB = require('./config/db');
+const Candidate = require('./models/Candidate');
+
+connectDB();
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors());
-
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Configure multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
-require('dotenv').config();
 
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
 
-// In-memory storage
+// In-memory cache (mirrors MongoDB for fast lookups during active sessions)
 let candidates = [];
 let bookedTimeSlots = {};
 
@@ -227,32 +231,36 @@ const questionBank = {
   },
   'E Department': {
     Operations: {
-      Coordinator: [
-        { question: 'What is the primary goal of operations? 1. Efficiency 2. Marketing 3. Sales', correctAnswer: '1' },
-        { question: 'What improves operational workflows? 1. Automation 2. Manual processes 3. More staff', correctAnswer: '1' }
-      ],
-      Specialist: [
-        { question: 'What is key in operations management? 1. Process optimization 2. Customer support 3. Financial audits', correctAnswer: '1' },
-        { question: 'What reduces operational costs? 1. Technology 2. Increased staff 3. Longer hours', correctAnswer: '1' }
-      ],
-      Manager: [
-        { question: 'What defines successful operations? 1. High efficiency 2. More products 3. Lower prices', correctAnswer: '1' },
-        { question: 'How to measure operational success? 1. KPIs 2. Customer feedback 3. Revenue', correctAnswer: '1' }
-      ]
+      Operations: {
+        Coordinator: [
+          { question: 'What is the primary goal of operations? 1. Efficiency 2. Marketing 3. Sales', correctAnswer: '1' },
+          { question: 'What improves operational workflows? 1. Automation 2. Manual processes 3. More staff', correctAnswer: '1' }
+        ],
+        Specialist: [
+          { question: 'What is key in operations management? 1. Process optimization 2. Customer support 3. Financial audits', correctAnswer: '1' },
+          { question: 'What reduces operational costs? 1. Technology 2. Increased staff 3. Longer hours', correctAnswer: '1' }
+        ],
+        Manager: [
+          { question: 'What defines successful operations? 1. High efficiency 2. More products 3. Lower prices', correctAnswer: '1' },
+          { question: 'How to measure operational success? 1. KPIs 2. Customer feedback 3. Revenue', correctAnswer: '1' }
+        ]
+      }
     },
     Analytics: {
-      Coordinator: [
-        { question: 'What is data analytics? 1. Data interpretation 2. Software development 3. Hardware maintenance', correctAnswer: '1' },
-        { question: 'What tool is used for analytics? 1. Excel 2. Word 3. Photoshop', correctAnswer: '1' }
-      ],
-      Specialist: [
-        { question: 'What is predictive analytics? 1. Forecasting trends 2. Code testing 3. UI design', correctAnswer: '1' },
-        { question: 'What improves analytics accuracy? 1. Quality data 2. More staff 3. Faster computers', correctAnswer: '1' }
-      ],
-      Manager: [
-        { question: 'What is a data-driven decision? 1. Based on analytics 2. Based on intuition 3. Based on surveys', correctAnswer: '1' },
-        { question: 'How to ensure analytics reliability? 1. Data validation 2. More reports 3. Less data', correctAnswer: '1' }
-      ]
+      Analytics: {
+        Coordinator: [
+          { question: 'What is data analytics? 1. Data interpretation 2. Software development 3. Hardware maintenance', correctAnswer: '1' },
+          { question: 'What tool is used for analytics? 1. Excel 2. Word 3. Photoshop', correctAnswer: '1' }
+        ],
+        Specialist: [
+          { question: 'What is predictive analytics? 1. Forecasting trends 2. Code testing 3. UI design', correctAnswer: '1' },
+          { question: 'What improves analytics accuracy? 1. Quality data 2. More staff 3. Faster computers', correctAnswer: '1' }
+        ],
+        Manager: [
+          { question: 'What is a data-driven decision? 1. Based on analytics 2. Based on intuition 3. Based on surveys', correctAnswer: '1' },
+          { question: 'How to ensure analytics reliability? 1. Data validation 2. More reports 3. Less data', correctAnswer: '1' }
+        ]
+      }
     }
   },
   DISP: {
@@ -319,7 +327,39 @@ const questionBank = {
   }
 };
 
-// Generate time slots from 10:00 AM to 11:00 AM and 3:00 PM to 8:00 PM IST
+// ─────────────────────────────────────────────
+// HELPER: update candidate in array + MongoDB
+// ─────────────────────────────────────────────
+async function updateCandidate(phone, updates) {
+  const idx = candidates.findIndex(c => c.phone === phone);
+  if (idx !== -1) Object.assign(candidates[idx], updates);
+  try {
+    await Candidate.findOneAndUpdate(
+      { phone },
+      { $set: updates },
+      { upsert: true, new: true }
+    );
+  } catch (err) {
+    console.error(`[updateCandidate] MongoDB update failed for ${phone}:`, err.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// HELPER: load candidates from MongoDB into memory on startup
+// ─────────────────────────────────────────────
+async function loadCandidatesFromDB() {
+  try {
+    const dbCandidates = await Candidate.find({});
+    candidates = dbCandidates.map(c => c.toObject());
+    console.log(`[STARTUP] Loaded ${candidates.length} candidates from MongoDB`);
+  } catch (err) {
+    console.error('[STARTUP] Failed to load candidates from MongoDB:', err.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Time slot helpers
+// ─────────────────────────────────────────────
 function generateTimeSlots() {
   const timeSlots = [];
   let morningStart = moment.tz('Asia/Kolkata').set({ hour: 10, minute: 0, second: 0, millisecond: 0 });
@@ -337,45 +377,39 @@ function generateTimeSlots() {
   return timeSlots;
 }
 
-// Get available time slots for a given date
 function getAvailableTimeSlots(date) {
   const allTimeSlots = generateTimeSlots();
   const booked = bookedTimeSlots[date] || [];
   return allTimeSlots.filter(slot => !booked.includes(slot));
 }
 
+// ─────────────────────────────────────────────
 // Promotion logic
+// ─────────────────────────────────────────────
 const getNextDesignation = (dept, subDept, section, currentDesignation) => {
   if (!dept || dept === 'Not selected' || !subDept || subDept === 'Not selected' || !currentDesignation || currentDesignation === 'Not selected') {
     console.warn(`[getNextDesignation] Invalid input: dept=${dept}, subDept=${subDept}, section=${section}, currentDesignation=${currentDesignation}`);
     return currentDesignation;
   }
-
   const designationKey = dept === 'E Department' ? subDept : section;
   if (!designationKey || designationKey === 'Not selected') {
     console.warn(`[getNextDesignation] Invalid designationKey: ${designationKey}`);
     return currentDesignation;
   }
-
   const designationList = designations[dept]?.[subDept]?.[designationKey];
   if (!Array.isArray(designationList)) {
     console.warn(`[getNextDesignation] Designation list not found for dept=${dept}, subDept=${subDept}, designationKey=${designationKey}`);
     return currentDesignation;
   }
-
   const currentIndex = designationList.indexOf(currentDesignation);
-  if (currentIndex === -1) {
-    console.warn(`[getNextDesignation] Current designation ${currentDesignation} not found in list:`, designationList);
-    return currentDesignation;
-  }
-
-  if (currentIndex < designationList.length - 1) {
-    return designationList[currentIndex + 1];
-  }
+  if (currentIndex === -1) return currentDesignation;
+  if (currentIndex < designationList.length - 1) return designationList[currentIndex + 1];
   return currentDesignation;
 };
 
-// Schedule interview at specified date and time in IST
+// ─────────────────────────────────────────────
+// Schedule interview
+// ─────────────────────────────────────────────
 function scheduleInterview(candidate) {
   const [hours, minutesAmpm] = candidate.interviewTime.split(':');
   const [minutes, ampm] = minutesAmpm.split(' ');
@@ -393,18 +427,21 @@ function scheduleInterview(candidate) {
   console.log(`[SCHEDULE-INTERVIEW] Scheduling for ${candidate.phone} at ${scheduleTime.toString()} (IST)`);
 
   const job = schedule.scheduleJob(scheduleTime, async () => {
-    const candidateIndex = candidates.findIndex(c => c.phone === candidate.phone);
-    if (candidateIndex === -1 || !candidates[candidateIndex].status.startsWith('Scheduled')) {
+    const candidateInMemory = candidates.find(c => c.phone === candidate.phone);
+    if (!candidateInMemory || !candidateInMemory.status.startsWith('Scheduled')) {
       console.log(`[SCHEDULE-INTERVIEW] Candidate ${candidate.phone} not found or not Scheduled`);
       return;
     }
 
     console.log(`[SCHEDULE-INTERVIEW] Job triggered for ${candidate.phone} at ${new Date().toString()}`);
-    candidates[candidateIndex].status = 'Interview Started';
-    candidates[candidateIndex].step = 'question';
-    candidates[candidateIndex].currentQuestionIndex = 0;
-    candidates[candidateIndex].answers = [];
-    candidates[candidateIndex].correctAnswers = 0;
+
+    await updateCandidate(candidate.phone, {
+      status: 'Interview Started',
+      step: 'question',
+      currentQuestionIndex: 0,
+      answers: [],
+      score: 0
+    });
 
     try {
       await client.calls.create({
@@ -416,8 +453,8 @@ function scheduleInterview(candidate) {
       });
       console.log(`[SCHEDULE-INTERVIEW] Voice call initiated for ${candidate.phone}`);
     } catch (error) {
-      console.error(`[SCHEDULE-INTERVIEW] Error start interview for ${candidate.phone}:`, error);
-      candidates[candidateIndex].status = 'Failed';
+      console.error(`[SCHEDULE-INTERVIEW] Error starting interview for ${candidate.phone}:`, error);
+      await updateCandidate(candidate.phone, { status: 'Failed' });
       await client.messages.create({
         body: 'An error occurred during your interview. Please contact support.',
         from: whatsappNumber,
@@ -429,11 +466,14 @@ function scheduleInterview(candidate) {
   console.log(`[SCHEDULE-INTERVIEW] Job scheduled for ${candidate.phone}: ${job.name}`);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ROUTES
+// ═══════════════════════════════════════════════════════════════
+
 // Upload candidates from Excel or CSV
-app.post('/upload-candidates', upload.single('file'), (req, res) => {
+app.post('/upload-candidates', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
-      console.error('[UPLOAD-CANDIDATES] No file uploaded');
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
@@ -450,14 +490,12 @@ app.post('/upload-candidates', upload.single('file'), (req, res) => {
       const parseResult = Papa.parse(fileContent, { header: true, skipEmptyLines: true });
       data = parseResult.data;
     } else {
-      console.error('[UPLOAD-CANDIDATES] Unsupported file format');
       return res.status(400).json({ error: 'Unsupported file format. Use Excel (.xlsx, .xls) or CSV (.csv)' });
     }
 
     fs.unlinkSync(req.file.path);
 
     if (data.length === 0) {
-      console.error('[UPLOAD-CANDIDATES] No valid candidates found');
       return res.status(400).json({ error: 'File is empty' });
     }
 
@@ -474,52 +512,37 @@ app.post('/upload-candidates', upload.single('file'), (req, res) => {
       const section = row.Section || row.section ? String(row.Section || row.section).trim() : 'Not selected';
       const designation = row.Designation || row.designation ? String(row.Designation || row.designation).trim() : 'Not selected';
 
-      if (!name || !phone) {
-        errors.push(`Row ${index + 2}: Missing name or phone`);
-        return;
-      }
-
-      if (!phone.match(/^\+\d{10,15}$/)) {
-        errors.push(`Row ${index + 2}: Invalid phone format (${phone})`);
-        return;
-      }
-
-      if (!validMethods.includes(method)) {
-        errors.push(`Row ${index + 2}: Invalid communication method (${method})`);
-        return;
-      }
+      if (!name || !phone) { errors.push(`Row ${index + 2}: Missing name or phone`); return; }
+      if (!phone.match(/^\+\d{10,15}$/)) { errors.push(`Row ${index + 2}: Invalid phone format (${phone})`); return; }
+      if (!validMethods.includes(method)) { errors.push(`Row ${index + 2}: Invalid communication method (${method})`); return; }
 
       newCandidates.push({
-        name,
-        phone,
-        method,
+        name, phone, method,
         status: 'Pending',
         response: null,
         interviewDate: null,
         interviewTime: null,
-        department,
-        subDepartment,
-        section,
-        designation,
+        department, subDepartment, section, designation,
         step: department === 'Not selected' ? 'welcome' : (subDepartment === 'Not selected' ? 'subDepartment' : (section === 'Not selected' && department !== 'E Department' ? 'section' : 'designation')),
         answers: [],
-        correctAnswers: 0,
+        score: 0,
+        totalQuestions: 0,
         currentQuestionIndex: 0
       });
     });
 
     if (newCandidates.length === 0) {
-      console.error('[UPLOAD-CANDIDATES] No valid candidates found');
       return res.status(400).json({ error: 'No valid candidates found', details: errors });
     }
 
     if (candidates.length + newCandidates.length > 20) {
-      console.error('[UPLOAD-CANDIDATES] Exceeds maximum candidate limit (20)');
       return res.status(400).json({ error: 'Adding candidates would exceed maximum limit of 20' });
     }
 
+    // Save to both in-memory array and MongoDB
     candidates.push(...newCandidates);
-    console.log('[UPLOAD-CANDIDATES] Added candidates:', JSON.stringify(newCandidates, null, 2));
+    await Candidate.insertMany(newCandidates);
+    console.log(`[UPLOAD-CANDIDATES] Saved ${newCandidates.length} candidates to MongoDB`);
 
     res.json({
       message: `Successfully added ${newCandidates.length} candidates`,
@@ -533,7 +556,7 @@ app.post('/upload-candidates', upload.single('file'), (req, res) => {
 });
 
 // Handle manual multi-user submission
-app.post('/send-manual', (req, res) => {
+app.post('/send-manual', async (req, res) => {
   const users = req.body;
   if (!users || !Array.isArray(users) || users.length === 0) {
     return res.status(400).json({ error: 'No users provided' });
@@ -542,29 +565,20 @@ app.post('/send-manual', (req, res) => {
   const validMethods = ['voice', 'whatsapp'];
   const results = [];
   const errors = [];
+  const toInsert = [];
 
   users.forEach((user, index) => {
     const name = user.name ? String(user.name).trim() : '';
     const phone = user.phone ? String(user.phone).trim() : '';
     const method = user.method ? String(user.method).trim().toLowerCase() : 'whatsapp';
 
-    if (!name || !phone) {
-      errors.push(`User ${index + 1}: Missing name or phone`);
-      return;
-    }
-
-    if (!phone.match(/^\+\d{10,15}$/)) {
-      errors.push(`User ${index + 1}: Invalid phone format (${phone})`);
-      return;
-    }
-
-    if (!validMethods.includes(method)) {
-      errors.push(`User ${index + 1}: Invalid communication method (${method})`);
-      return;
-    }
+    if (!name || !phone) { errors.push(`User ${index + 1}: Missing name or phone`); return; }
+    if (!phone.match(/^\+\d{10,15}$/)) { errors.push(`User ${index + 1}: Invalid phone format (${phone})`); return; }
+    if (!validMethods.includes(method)) { errors.push(`User ${index + 1}: Invalid communication method (${method})`); return; }
 
     const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
-    candidates.push({
+
+    const candidateData = {
       name,
       phone: normalizedPhone,
       method,
@@ -578,15 +592,14 @@ app.post('/send-manual', (req, res) => {
       designation: 'Not selected',
       step: 'welcome',
       answers: [],
-      correctAnswers: 0,
+      score: 0,
+      totalQuestions: 0,
       currentQuestionIndex: 0
-    });
+    };
 
-    results.push({
-      name,
-      phone: normalizedPhone,
-      status: 'Added to candidates'
-    });
+    candidates.push(candidateData);
+    toInsert.push(candidateData);
+    results.push({ name, phone: normalizedPhone, status: 'Added to candidates' });
   });
 
   if (candidates.length > 20) {
@@ -594,7 +607,16 @@ app.post('/send-manual', (req, res) => {
     errors.push('Candidate limit of 20 reached; excess candidates ignored');
   }
 
-  console.log('[SEND-MANUAL] Added candidates:', JSON.stringify(results, null, 2));
+  // Save to MongoDB
+  if (toInsert.length > 0) {
+    try {
+      await Candidate.insertMany(toInsert);
+      console.log(`[SEND-MANUAL] Saved ${toInsert.length} candidates to MongoDB`);
+    } catch (err) {
+      console.error('[SEND-MANUAL] MongoDB save error:', err.message);
+    }
+  }
+
   res.json({
     message: `Successfully added ${results.length} candidates`,
     candidates: results,
@@ -607,13 +629,11 @@ app.post('/start-interview', async (req, res) => {
   try {
     const pendingCandidates = candidates.filter(c => c.status === 'Pending');
     if (pendingCandidates.length === 0) {
-      console.log('[START-INTERVIEW] No pending candidates');
       return res.json({ message: 'No pending candidates to process' });
     }
 
     for (const candidate of pendingCandidates) {
-      const candidateIndex = candidates.findIndex(c => c.phone === candidate.phone);
-      candidates[candidateIndex].status = 'In Progress';
+      await updateCandidate(candidate.phone, { status: 'In Progress' });
       console.log(`[START-INTERVIEW] Processing ${candidate.method} for ${candidate.phone}`);
 
       try {
@@ -636,7 +656,7 @@ app.post('/start-interview', async (req, res) => {
         }
       } catch (error) {
         console.error(`[START-INTERVIEW] Error processing ${candidate.method} for ${candidate.phone}:`, error);
-        candidates[candidateIndex].status = 'Failed';
+        await updateCandidate(candidate.phone, { status: 'Failed' });
       }
     }
 
@@ -654,24 +674,14 @@ app.post('/voice', (req, res) => {
   console.log('[VOICE] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
-    const incomingPhone = req.body.To;
-    const candidate = candidates.find(c => c.phone === incomingPhone);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate) {
-      console.log(`[VOICE] No candidate found matching phone: ${incomingPhone}`);
       response.say('No active interview found. Goodbye.');
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    candidate.status = 'In Progress';
-    candidate.step = 'welcome';
-
-    const gather = response.gather({
-      numDigits: 1,
-      action: '/welcome-response',
-      method: 'POST',
-      timeout: 5
-    });
+    const gather = response.gather({ numDigits: 1, action: '/welcome-response', method: 'POST', timeout: 5 });
     gather.say('Welcome to the Jindal Saw Limited automated AI interview. Would you like to take an interview? Press 1 for Yes, 2 for No.');
   } catch (error) {
     console.error('[VOICE] Error:', error);
@@ -683,34 +693,26 @@ app.post('/voice', (req, res) => {
 });
 
 // Welcome response endpoint for voice
-app.post('/welcome-response', (req, res) => {
+app.post('/welcome-response', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[WELCOME-RESPONSE] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit || !['1', '2'].includes(digit)) {
-      console.log('[WELCOME-RESPONSE] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
     if (digit === '1') {
-      candidate.step = 'department';
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-department',
-        method: 'POST',
-        timeout: 5
-      });
+      await updateCandidate(candidate.phone, { step: 'department' });
+      const gather = response.gather({ numDigits: 1, action: '/select-department', method: 'POST', timeout: 5 });
       gather.say(`Please select a department: ${departments.map((d, i) => `${i + 1}. ${d}`).join(', ')}.`);
     } else {
-      candidate.status = 'Declined';
-      candidate.step = 'done';
+      await updateCandidate(candidate.phone, { status: 'Declined', step: 'done' });
       response.say('Thank you for your response. Goodbye.');
     }
   } catch (error) {
@@ -723,41 +725,27 @@ app.post('/welcome-response', (req, res) => {
 });
 
 // Department selection endpoint for voice
-app.post('/select-department', (req, res) => {
+app.post('/select-department', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-DEPARTMENT] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit) {
-      console.log('[SELECT-DEPARTMENT] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
     const deptIndex = parseInt(digit) - 1;
     if (deptIndex >= 0 && deptIndex < departments.length) {
-      candidate.department = departments[deptIndex];
-      candidate.step = 'subDepartment';
-      console.log(`[SELECT-DEPARTMENT] Candidate ${candidate.phone} selected department: ${candidate.department}`);
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-subdepartment',
-        method: 'POST',
-        timeout: 5
-      });
-      gather.say(`You selected ${candidate.department}. Please select a sub-department: ${subDepartments[candidate.department].map((sd, i) => `${i + 1}. ${sd}`).join(', ')}.`);
+      await updateCandidate(candidate.phone, { department: departments[deptIndex], step: 'subDepartment' });
+      const gather = response.gather({ numDigits: 1, action: '/select-subdepartment', method: 'POST', timeout: 5 });
+      gather.say(`You selected ${departments[deptIndex]}. Please select a sub-department: ${subDepartments[departments[deptIndex]].map((sd, i) => `${i + 1}. ${sd}`).join(', ')}.`);
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-department',
-        method: 'POST',
-        timeout: 5
-      });
+      const gather = response.gather({ numDigits: 1, action: '/select-department', method: 'POST', timeout: 5 });
       gather.say(`Please select a valid department: ${departments.map((d, i) => `${i + 1}. ${d}`).join(', ')}.`);
     }
   } catch (error) {
@@ -770,18 +758,16 @@ app.post('/select-department', (req, res) => {
 });
 
 // Sub-department selection endpoint for voice
-app.post('/select-subdepartment', (req, res) => {
+app.post('/select-subdepartment', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-SUBDEPARTMENT] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit) {
-      console.log('[SELECT-SUBDEPARTMENT] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
@@ -789,9 +775,9 @@ app.post('/select-subdepartment', (req, res) => {
     const subDeptList = subDepartments[candidate.department];
     const subDeptIndex = parseInt(digit) - 1;
     if (subDeptIndex >= 0 && subDeptIndex < subDeptList.length) {
-      candidate.subDepartment = subDeptList[subDeptIndex];
-      candidate.step = candidate.department === 'E Department' ? 'designation' : 'section';
-      console.log(`[SELECT-SUBDEPARTMENT] Candidate ${candidate.phone} selected sub-department: ${candidate.subDepartment}`);
+      const selectedSubDept = subDeptList[subDeptIndex];
+      const nextStep = candidate.department === 'E Department' ? 'designation' : 'section';
+      await updateCandidate(candidate.phone, { subDepartment: selectedSubDept, step: nextStep });
       const gather = response.gather({
         numDigits: 1,
         action: candidate.department === 'E Department' ? '/select-designation' : '/select-section',
@@ -799,16 +785,11 @@ app.post('/select-subdepartment', (req, res) => {
         timeout: 5
       });
       const prompt = candidate.department === 'E Department'
-        ? `You selected ${candidate.subDepartment}. Please select a designation: ${designations[candidate.department][candidate.subDepartment][candidate.subDepartment].map((d, i) => `${i + 1}. ${d}`).join(', ')}.`
-        : `You selected ${candidate.subDepartment}. Please select a section: ${sections[candidate.department][candidate.subDepartment].map((s, i) => `${i + 1}. ${s}`).join(', ')}.`;
+        ? `You selected ${selectedSubDept}. Please select a designation: ${designations[candidate.department][selectedSubDept][selectedSubDept].map((d, i) => `${i + 1}. ${d}`).join(', ')}.`
+        : `You selected ${selectedSubDept}. Please select a section: ${sections[candidate.department][selectedSubDept].map((s, i) => `${i + 1}. ${s}`).join(', ')}.`;
       gather.say(prompt);
     } else {
-      const gather = response.gather({
-        numDigits: '1',
-        action: '/select-subdepartment',
-        method: 'POST',
-        timeout: 5
-      });
+      const gather = response.gather({ numDigits: '1', action: '/select-subdepartment', method: 'POST', timeout: 5 });
       gather.say(`Please select a valid sub-department: ${subDeptList.map((sd, i) => `${i + 1}. ${sd}`).join(', ')}.`);
     }
   } catch (error) {
@@ -821,18 +802,16 @@ app.post('/select-subdepartment', (req, res) => {
 });
 
 // Section selection endpoint for voice
-app.post('/select-section', (req, res) => {
+app.post('/select-section', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-SECTION] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit) {
-      console.log('[SELECT-SECTION] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
@@ -840,23 +819,12 @@ app.post('/select-section', (req, res) => {
     const sectionList = sections[candidate.department][candidate.subDepartment];
     const sectionIndex = parseInt(digit) - 1;
     if (sectionIndex >= 0 && sectionIndex < sectionList.length) {
-      candidate.section = sectionList[sectionIndex];
-      candidate.step = 'designation';
-      console.log(`[SELECT-SECTION] Candidate ${candidate.phone} selected section: ${candidate.section}`);
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-designation',
-        method: 'POST',
-        timeout: 5
-      });
-      gather.say(`You selected ${candidate.section}. Please select a designation: ${designations[candidate.department][candidate.subDepartment][candidate.section].map((d, i) => `${i + 1}. ${d}`).join(', ')}.`);
+      const selectedSection = sectionList[sectionIndex];
+      await updateCandidate(candidate.phone, { section: selectedSection, step: 'designation' });
+      const gather = response.gather({ numDigits: 1, action: '/select-designation', method: 'POST', timeout: 5 });
+      gather.say(`You selected ${selectedSection}. Please select a designation: ${designations[candidate.department][candidate.subDepartment][selectedSection].map((d, i) => `${i + 1}. ${d}`).join(', ')}.`);
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-section',
-        method: 'POST',
-        timeout: 5
-      });
+      const gather = response.gather({ numDigits: 1, action: '/select-section', method: 'POST', timeout: 5 });
       gather.say(`Please select a valid section: ${sectionList.map((s, i) => `${i + 1}. ${s}`).join(', ')}.`);
     }
   } catch (error) {
@@ -869,18 +837,16 @@ app.post('/select-section', (req, res) => {
 });
 
 // Designation selection endpoint for voice
-app.post('/select-designation', (req, res) => {
+app.post('/select-designation', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-DESIGNATION] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit) {
-      console.log('[SELECT-DESIGNATION] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
@@ -888,23 +854,12 @@ app.post('/select-designation', (req, res) => {
     const desigList = designations[candidate.department][candidate.subDepartment][candidate.department === 'E Department' ? candidate.subDepartment : candidate.section];
     const desigIndex = parseInt(digit) - 1;
     if (desigIndex >= 0 && desigIndex < desigList.length) {
-      candidate.designation = desigList[desigIndex];
-      candidate.step = 'schedule';
-      console.log(`[SELECT-DESIGNATION] Candidate ${candidate.phone} selected designation: ${candidate.designation}`);
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/answer',
-        method: 'POST',
-        timeout: 5
-      });
-      gather.say(`You selected ${candidate.designation}. Would you like to schedule an interview? Press 1 for Yes, 2 for No.`);
+      const selectedDesig = desigList[desigIndex];
+      await updateCandidate(candidate.phone, { designation: selectedDesig, step: 'schedule' });
+      const gather = response.gather({ numDigits: 1, action: '/answer', method: 'POST', timeout: 5 });
+      gather.say(`You selected ${selectedDesig}. Would you like to schedule an interview? Press 1 for Yes, 2 for No.`);
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-designation',
-        method: 'POST',
-        timeout: 5
-      });
+      const gather = response.gather({ numDigits: 1, action: '/select-designation', method: 'POST', timeout: 5 });
       gather.say(`Please select a valid designation: ${desigList.map((d, i) => `${i + 1}. ${d}`).join(', ')}.`);
     }
   } catch (error) {
@@ -916,37 +871,28 @@ app.post('/select-designation', (req, res) => {
   res.send(response.toString());
 });
 
-// Voice answer endpoint
-app.post('/answer', (req, res) => {
+// Voice answer (schedule confirmation) endpoint
+app.post('/answer', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[ANSWER] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit || !['1', '2'].includes(digit)) {
-      console.log('[ANSWER] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    candidate.response = digit === '1' ? 'Yes' : 'No';
-    console.log('[ANSWER] Candidate response:', candidate.response);
-
-    if (candidate.response === 'Yes') {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-date',
-        method: 'POST',
-        timeout: 5
-      });
+    if (digit === '1') {
+      await updateCandidate(candidate.phone, { response: 'Yes' });
+      const gather = response.gather({ numDigits: 1, action: '/select-date', method: 'POST', timeout: 5 });
       gather.say('Please select your interview date. Press 1 for today, 2 for tomorrow, or 3 for the day after.');
     } else {
+      await updateCandidate(candidate.phone, { response: 'No', status: 'Declined' });
       response.say('Thank you for your response. Goodbye.');
-      candidate.status = 'Declined';
     }
   } catch (error) {
     console.error('[ANSWER] Error:', error);
@@ -958,51 +904,34 @@ app.post('/answer', (req, res) => {
 });
 
 // Date selection endpoint for voice
-app.post('/select-date', (req, res) => {
+app.post('/select-date', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-DATE] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit || !['1', '2', '3'].includes(digit)) {
-      console.log('[SELECT-DATE] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
     const today = moment.tz('Asia/Kolkata');
-    let selectedDate;
-    if (digit === '1') {
-      selectedDate = today;
-    } else if (digit === '2') {
-      selectedDate = today.clone().add(1, 'days');
-    } else {
-      selectedDate = today.clone().add(2, 'days');
-    }
-    candidate.interviewDate = selectedDate.format('YYYY-MM-DD');
-    const availableSlots = getAvailableTimeSlots(candidate.interviewDate);
+    const selectedDate = digit === '1' ? today : digit === '2' ? today.clone().add(1, 'days') : today.clone().add(2, 'days');
+    const dateStr = selectedDate.format('YYYY-MM-DD');
+    await updateCandidate(candidate.phone, { interviewDate: dateStr });
+
+    const availableSlots = getAvailableTimeSlots(dateStr);
     if (availableSlots.length === 0) {
-      response.say(`Sorry, no time slots are available for ${candidate.interviewDate}. Please select another date.`);
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-date',
-        method: 'POST',
-        timeout: 5
-      });
+      response.say(`Sorry, no time slots are available for ${dateStr}. Please select another date.`);
+      const gather = response.gather({ numDigits: 1, action: '/select-date', method: 'POST', timeout: 5 });
       gather.say('Press 1 for today, 2 for tomorrow, or 3 for the day after.');
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-time',
-        method: 'POST',
-        timeout: 5
-      });
-      gather.say(`Please select a time slot for ${candidate.interviewDate}. Available slots: ${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join(', ')}.`);
-      candidate.step = 'time';
+      await updateCandidate(candidate.phone, { step: 'time' });
+      const gather = response.gather({ numDigits: 1, action: '/select-time', method: 'POST', timeout: 5 });
+      gather.say(`Please select a time slot for ${dateStr}. Available slots: ${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join(', ')}.`);
     }
   } catch (error) {
     console.error('[SELECT-DATE] Error:', error);
@@ -1014,26 +943,25 @@ app.post('/select-date', (req, res) => {
 });
 
 // Time selection endpoint for voice
-app.post('/select-time', (req, res) => {
+app.post('/select-time', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[SELECT-TIME] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'In Progress' && c.method === 'voice');
     if (!candidate || !digit) {
-      console.log('[SELECT-TIME] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    if (candidate.department === 'Not selected' || candidate.subDepartment === 'Not selected' || (candidate.department !== 'E Department' && candidate.section === 'Not selected') || candidate.designation === 'Not selected') {
-      console.error(`[SELECT-TIME] Invalid candidate data:`, JSON.stringify(candidate, null, 2));
+    if (candidate.department === 'Not selected' || candidate.subDepartment === 'Not selected' ||
+      (candidate.department !== 'E Department' && candidate.section === 'Not selected') ||
+      candidate.designation === 'Not selected') {
       response.say('Invalid candidate data. Please start over. Goodbye.');
-      candidate.status = 'Failed';
+      await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
@@ -1043,37 +971,24 @@ app.post('/select-time', (req, res) => {
     if (timeIndex >= 0 && timeIndex < availableSlots.length) {
       const selectedSlot = availableSlots[timeIndex];
       if (!bookedTimeSlots[candidate.interviewDate]?.includes(selectedSlot)) {
-        candidate.interviewTime = selectedSlot;
-        if (!bookedTimeSlots[candidate.interviewDate]) {
-          bookedTimeSlots[candidate.interviewDate] = [];
-        }
-        bookedTimeSlots[candidate.interviewDate].push(candidate.interviewTime);
+        if (!bookedTimeSlots[candidate.interviewDate]) bookedTimeSlots[candidate.interviewDate] = [];
+        bookedTimeSlots[candidate.interviewDate].push(selectedSlot);
         const nextDesignation = getNextDesignation(candidate.department, candidate.subDepartment, candidate.section || candidate.subDepartment, candidate.designation);
-        candidate.status = `Scheduled for ${nextDesignation} (current: ${candidate.designation})`;
-        console.log(`[SELECT-TIME] Candidate ${candidate.phone} selected time slot: ${candidate.interviewTime}`);
-        scheduleInterview(candidate);
-        response.say(`Your interview is scheduled on ${candidate.interviewDate} at ${candidate.interviewTime}. Thank you!`);
+        const newStatus = `Scheduled for ${nextDesignation} (current: ${candidate.designation})`;
+        await updateCandidate(candidate.phone, { interviewTime: selectedSlot, status: newStatus });
+        scheduleInterview({ ...candidate, interviewTime: selectedSlot, status: newStatus });
+        response.say(`Your interview is scheduled on ${candidate.interviewDate} at ${selectedSlot}. Thank you!`);
         client.messages.create({
-          body: `Your interview is scheduled on ${candidate.interviewDate} at ${candidate.interviewTime}.`,
+          body: `Your interview is scheduled on ${candidate.interviewDate} at ${selectedSlot}.`,
           from: whatsappNumber,
           to: `whatsapp:${candidate.phone}`
         });
       } else {
-        const gather = response.gather({
-          numDigits: 1,
-          action: '/select-time',
-          method: 'POST',
-          timeout: 5
-        });
+        const gather = response.gather({ numDigits: 1, action: '/select-time', method: 'POST', timeout: 5 });
         gather.say(`Sorry, that time slot is taken. Please select another: ${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join(', ')}.`);
       }
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/select-time',
-        method: 'POST',
-        timeout: 5
-      });
+      const gather = response.gather({ numDigits: 1, action: '/select-time', method: 'POST', timeout: 5 });
       gather.say(`Please select a valid time slot: ${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join(', ')}.`);
     }
   } catch (error) {
@@ -1086,36 +1001,29 @@ app.post('/select-time', (req, res) => {
 });
 
 // Voice question endpoint
-app.post('/voice-question', (req, res) => {
+app.post('/voice-question', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[VOICE-QUESTION] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'Interview Started');
     if (!candidate) {
-      console.log('[VOICE-QUESTION] No candidate in interview');
       response.say('No active interview found. Goodbye.');
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    const questions = questionBank[candidate.department][candidate.subDepartment][candidate.section || candidate.subDepartment][candidate.designation] || [];
+    const questions = questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation] || [];
     const questionIndex = candidate.currentQuestionIndex || 0;
 
     if (questionIndex >= questions.length) {
-      candidate.status = 'Interview Completed';
+      await updateCandidate(candidate.phone, { status: 'Interview Completed' });
       response.say('Thank you for completing the interview. Goodbye.');
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    const gather = response.gather({
-      numDigits: 1,
-      action: '/voice-answer',
-      method: 'POST',
-      timeout: 5
-    });
+    const gather = response.gather({ numDigits: 1, action: '/voice-answer', method: 'POST', timeout: 5 });
     gather.say(questions[questionIndex].question);
   } catch (error) {
     console.error('[VOICE-QUESTION] Error:', error);
@@ -1127,41 +1035,45 @@ app.post('/voice-question', (req, res) => {
 });
 
 // Voice answer endpoint
-app.post('/voice-answer', (req, res) => {
+app.post('/voice-answer', async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
-  console.log('[VOICE-ANSWER] Request body:', JSON.stringify(req.body, null, 2));
 
   try {
     const digit = req.body.Digits;
-    const candidate = candidates.find(c => c.phone === req.body.From);
+    const candidate = candidates.find(c => c.status === 'Interview Started');
     if (!candidate || !digit) {
-      console.log('[VOICE-ANSWER] Invalid input or no candidate');
       response.say('Invalid input. Goodbye.');
-      candidate && (candidate.status = 'Failed');
+      if (candidate) await updateCandidate(candidate.phone, { status: 'Failed' });
       res.type('text/xml');
       return res.send(response.toString());
     }
 
-    const questions = questionBank[candidate.department][candidate.subDepartment][candidate.section || candidate.subDepartment][candidate.designation] || [];
+    const questions = questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation] || [];
     const questionIndex = candidate.currentQuestionIndex || 0;
-    candidate.answers.push(digit);
-    if (digit === questions[questionIndex].correctAnswer) {
-      candidate.correctAnswers = (candidate.correctAnswers || 0) + 1;
-    }
 
-    candidate.currentQuestionIndex = questionIndex + 1;
-    if (candidate.currentQuestionIndex >= questions.length) {
-      candidate.status = 'Interview Completed';
+    const updatedAnswers = [...(candidate.answers || []), digit];
+    const isCorrect = digit === questions[questionIndex].correctAnswer;
+    const updatedScore = (candidate.score || 0) + (isCorrect ? 1 : 0);
+    const nextIndex = questionIndex + 1;
+
+    if (nextIndex >= questions.length) {
+      await updateCandidate(candidate.phone, {
+        answers: updatedAnswers,
+        score: updatedScore,
+        totalQuestions: questions.length,
+        currentQuestionIndex: nextIndex,
+        status: 'Interview Completed'
+      });
       response.say('Thank you for completing the interview. Goodbye.');
     } else {
-      const gather = response.gather({
-        numDigits: 1,
-        action: '/voice-question',
-        method: 'POST',
-        timeout: 5
+      await updateCandidate(candidate.phone, {
+        answers: updatedAnswers,
+        score: updatedScore,
+        currentQuestionIndex: nextIndex
       });
-      gather.say(questions[candidate.currentQuestionIndex].question);
+      const gather = response.gather({ numDigits: 1, action: '/voice-answer', method: 'POST', timeout: 5 });
+      gather.say(questions[nextIndex].question);
     }
   } catch (error) {
     console.error('[VOICE-ANSWER] Error:', error);
@@ -1173,15 +1085,14 @@ app.post('/voice-answer', (req, res) => {
 });
 
 // Call status callback
-app.post('/call-status', (req, res) => {
+app.post('/call-status', async (req, res) => {
   console.log('[CALL-STATUS] Request body:', JSON.stringify(req.body, null, 2));
   try {
-    const incomingPhone = req.body.To || req.body.From;
-    const candidate = candidates.find(c => c.phone === incomingPhone);
+    const candidate = candidates.find(c => ['In Progress', 'Interview Started'].includes(c.status));
     if (candidate) {
-      const candidateIndex = candidates.findIndex(c => c.phone === candidate.phone);
-      candidates[candidateIndex].status = req.body.CallStatus === 'completed' ? 'Interview Completed' : 'Failed';
-      console.log(`[CALL-STATUS] Updated candidate ${candidate.phone} to ${candidates[candidateIndex].status}`);
+      const newStatus = req.body.CallStatus === 'completed' ? 'Interview Completed' : 'Failed';
+      await updateCandidate(candidate.phone, { status: newStatus });
+      console.log(`[CALL-STATUS] Updated candidate ${candidate.phone} to ${newStatus}`);
     }
     res.sendStatus(200);
   } catch (error) {
@@ -1196,11 +1107,14 @@ app.post('/webhook', async (req, res) => {
   const message = req.body.Body.trim().toLowerCase();
   console.log(`[WEBHOOK] Received from ${from}: ${message}`);
 
-  let candidate = candidates.find(c => c.phone === from.replace('whatsapp:', '') && c.method === 'whatsapp');
+  const phone = from.replace('whatsapp:', '');
+  let candidate = candidates.find(c => c.phone === phone && c.method === 'whatsapp');
+
   if (!candidate) {
+    // New candidate via WhatsApp — create in both memory and MongoDB
     candidate = {
       name: 'Unknown',
-      phone: from.replace('whatsapp:', ''),
+      phone,
       method: 'whatsapp',
       status: 'Started via WhatsApp',
       response: null,
@@ -1212,182 +1126,179 @@ app.post('/webhook', async (req, res) => {
       designation: 'Not selected',
       step: 'welcome',
       answers: [],
-      correctAnswers: 0,
+      score: 0,
+      totalQuestions: 0,
       currentQuestionIndex: 0
     };
     candidates.push(candidate);
-  }
-
-  if (['Scheduled', 'Declined', 'Failed'].includes(candidate.status) && candidate.step === 'done') {
-    console.log(`[WEBHOOK] Resuming candidate ${from} from ${candidate.status}`);
-    candidate.status = 'In Progress';
-    if (candidate.interviewDate) {
-      candidate.step = 'time';
-    } else if (candidate.designation !== 'Not selected') {
-      candidate.step = 'schedule';
-    } else if (candidate.section !== 'Not selected') {
-      candidate.step = 'designation';
-    } else if (candidate.subDepartment !== 'Not selected') {
-      candidate.step = candidate.department === 'E Department' ? 'designation' : 'section';
-    } else if (candidate.department !== 'Not selected') {
-      candidate.step = 'subDepartment';
-    } else if (candidate.name !== 'Unknown') {
-      candidate.step = 'department';
-    } else {
-      candidate.step = 'welcome';
+    try {
+      await Candidate.create(candidate);
+      console.log(`[WEBHOOK] New candidate ${phone} saved to MongoDB`);
+    } catch (err) {
+      console.error('[WEBHOOK] Failed to create candidate in MongoDB:', err.message);
     }
   }
 
-  let response = '';
+  if (['Scheduled', 'Declined', 'Failed'].includes(candidate.status) && candidate.step === 'done') {
+    candidate.status = 'In Progress';
+    if (candidate.interviewDate) candidate.step = 'time';
+    else if (candidate.designation !== 'Not selected') candidate.step = 'schedule';
+    else if (candidate.section !== 'Not selected') candidate.step = 'designation';
+    else if (candidate.subDepartment !== 'Not selected') candidate.step = candidate.department === 'E Department' ? 'designation' : 'section';
+    else if (candidate.department !== 'Not selected') candidate.step = 'subDepartment';
+    else if (candidate.name !== 'Unknown') candidate.step = 'department';
+    else candidate.step = 'welcome';
+    await updateCandidate(phone, { status: candidate.status, step: candidate.step });
+  }
+
+  let responseText = '';
 
   switch (candidate.step) {
     case 'welcome':
       if (message === '1' || message === 'yes') {
-        candidate.status = 'In Progress';
-        response = 'Please provide your name.';
-        candidate.step = 'name';
+        await updateCandidate(phone, { status: 'In Progress', step: 'name' });
+        responseText = 'Please provide your name.';
       } else if (message === '2' || message === 'no') {
-        candidate.status = 'Declined';
-        response = 'Thank you for your response. Goodbye.';
-        candidate.step = 'done';
+        await updateCandidate(phone, { status: 'Declined', step: 'done' });
+        responseText = 'Thank you for your response. Goodbye.';
       } else {
-        response = 'Welcome to the Jindal Saw Limited automated AI interview. Would you like to take an interview? 1 for Yes, 2 for No';
+        responseText = 'Welcome to the Jindal Saw Limited automated AI interview. Would you like to take an interview? 1 for Yes, 2 for No';
       }
       break;
-    case 'name':
-      candidate.name = message.charAt(0).toUpperCase() + message.slice(1);
-      candidate.status = 'Name provided';
-      response = `Hello ${candidate.name}, please select a department:\n${departments.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
-      candidate.step = 'department';
+
+    case 'name': {
+      const formattedName = message.charAt(0).toUpperCase() + message.slice(1);
+      await updateCandidate(phone, { name: formattedName, status: 'Name provided', step: 'department' });
+      responseText = `Hello ${formattedName}, please select a department:\n${departments.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
       break;
-    case 'department':
+    }
+
+    case 'department': {
       const deptIndex = parseInt(message) - 1;
       if (deptIndex >= 0 && deptIndex < departments.length) {
-        candidate.department = departments[deptIndex];
-        candidate.status = 'Department selected';
-        response = `You selected ${candidate.department}.\nPlease select a sub-department:\n${subDepartments[candidate.department].map((sd, i) => `${i + 1}. ${sd}`).join('\n')}`;
-        candidate.step = 'subDepartment';
+        await updateCandidate(phone, { department: departments[deptIndex], status: 'Department selected', step: 'subDepartment' });
+        responseText = `You selected ${departments[deptIndex]}.\nPlease select a sub-department:\n${subDepartments[departments[deptIndex]].map((sd, i) => `${i + 1}. ${sd}`).join('\n')}`;
       } else {
-        response = `Please select a valid department:\n${departments.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
+        responseText = `Please select a valid department:\n${departments.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
       }
       break;
-    case 'subDepartment':
+    }
+
+    case 'subDepartment': {
       const subDeptList = subDepartments[candidate.department];
       const subDeptIndex = parseInt(message) - 1;
       if (subDeptIndex >= 0 && subDeptIndex < subDeptList.length) {
-        candidate.subDepartment = subDeptList[subDeptIndex];
-        candidate.status = 'Sub-department selected';
-        candidate.step = candidate.department === 'E Department' ? 'designation' : 'section';
-        response = candidate.department === 'E Department'
-          ? `You selected ${candidate.subDepartment}.\nPlease select a designation:\n${designations[candidate.department][candidate.subDepartment][candidate.subDepartment].map((d, i) => `${i + 1}. ${d}`).join('\n')}`
-          : `You selected ${candidate.subDepartment}.\nPlease select a section:\n${sections[candidate.department][candidate.subDepartment].map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
+        const selectedSubDept = subDeptList[subDeptIndex];
+        const nextStep = candidate.department === 'E Department' ? 'designation' : 'section';
+        await updateCandidate(phone, { subDepartment: selectedSubDept, status: 'Sub-department selected', step: nextStep });
+        responseText = candidate.department === 'E Department'
+          ? `You selected ${selectedSubDept}.\nPlease select a designation:\n${designations[candidate.department][selectedSubDept][selectedSubDept].map((d, i) => `${i + 1}. ${d}`).join('\n')}`
+          : `You selected ${selectedSubDept}.\nPlease select a section:\n${sections[candidate.department][selectedSubDept].map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
       } else {
-        response = `Please select a valid sub-department:\n${subDeptList.map((sd, i) => `${i + 1}. ${sd}`).join('\n')}`;
+        responseText = `Please select a valid sub-department:\n${subDeptList.map((sd, i) => `${i + 1}. ${sd}`).join('\n')}`;
       }
       break;
-    case 'section':
+    }
+
+    case 'section': {
       const sectionList = sections[candidate.department][candidate.subDepartment];
       const sectionIndex = parseInt(message) - 1;
       if (sectionIndex >= 0 && sectionIndex < sectionList.length) {
-        candidate.section = sectionList[sectionIndex];
-        candidate.status = 'Section selected';
-        response = `You selected ${candidate.section}.\nPlease select a designation:\n${designations[candidate.department][candidate.subDepartment][candidate.section].map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
-        candidate.step = 'designation';
+        const selectedSection = sectionList[sectionIndex];
+        await updateCandidate(phone, { section: selectedSection, status: 'Section selected', step: 'designation' });
+        responseText = `You selected ${selectedSection}.\nPlease select a designation:\n${designations[candidate.department][candidate.subDepartment][selectedSection].map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
       } else {
-        response = `Please select a valid section:\n${sectionList.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
+        responseText = `Please select a valid section:\n${sectionList.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
       }
       break;
-    case 'designation':
+    }
+
+    case 'designation': {
       const desigList = designations[candidate.department][candidate.subDepartment][candidate.department === 'E Department' ? candidate.subDepartment : candidate.section];
       const desigIndex = parseInt(message) - 1;
       if (desigIndex >= 0 && desigIndex < desigList.length) {
-        candidate.designation = desigList[desigIndex]; 
-        candidate.status = 'Designation selected';
-        response = `You selected ${candidate.designation}.\nWould you like to schedule an interview?\n1. Yes\n2. No`;
-        candidate.step = 'schedule';
+        await updateCandidate(phone, { designation: desigList[desigIndex], status: 'Designation selected', step: 'schedule' });
+        responseText = `You selected ${desigList[desigIndex]}.\nWould you like to schedule an interview?\n1. Yes\n2. No`;
       } else {
-        response = `Please select a valid designation:\n${desigList.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
+        responseText = `Please select a valid designation:\n${desigList.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
       }
       break;
+    }
+
     case 'schedule':
       if (message === '1' || message === 'yes') {
-        candidate.status = 'Scheduling interview';
-        response = 'Please select your interview date:\n1. Today\n2. Tomorrow\n3. Day after';
-        candidate.step = 'date';
+        await updateCandidate(phone, { status: 'Scheduling interview', step: 'date' });
+        responseText = 'Please select your interview date:\n1. Today\n2. Tomorrow\n3. Day after';
       } else if (message === '2' || message === 'no') {
-        candidate.status = 'Declined';
-        response = 'Thank you! If you wish to schedule an interview later, please contact again.';
-        candidate.step = 'done';
+        await updateCandidate(phone, { status: 'Declined', step: 'done' });
+        responseText = 'Thank you! If you wish to schedule an interview later, please contact again.';
       } else {
-        response = 'Please select 1 (Yes) or 2 (No).';
+        responseText = 'Please select 1 (Yes) or 2 (No).';
       }
       break;
-    case 'date':
+
+    case 'date': {
       if (['1', '2', '3'].includes(message)) {
         const today = moment.tz('Asia/Kolkata');
-        let selectedDate;
-        if (message === '1') {
-          selectedDate = today;
-        } else if (message === '2') {
-          selectedDate = today.clone().add(1, 'days');
-        } else {
-          selectedDate = today.clone().add(2, 'days');
-        }
-        candidate.interviewDate = selectedDate.format('YYYY-MM-DD');
-        candidate.status = 'Date selected';
-        const availableSlots = getAvailableTimeSlots(candidate.interviewDate);
+        const selectedDate = message === '1' ? today : message === '2' ? today.clone().add(1, 'days') : today.clone().add(2, 'days');
+        const dateStr = selectedDate.format('YYYY-MM-DD');
+        await updateCandidate(phone, { interviewDate: dateStr, status: 'Date selected' });
+        const availableSlots = getAvailableTimeSlots(dateStr);
         if (availableSlots.length === 0) {
-          response = `Sorry, no time slots are available for ${candidate.interviewDate}. Please select another date:\n1. Today\n2. Tomorrow\n3. Day after`;
-          candidate.step = 'date';
+          responseText = `Sorry, no time slots are available for ${dateStr}. Please select another date:\n1. Today\n2. Tomorrow\n3. Day after`;
         } else {
-          response = `Please select a time slot for ${candidate.interviewDate}:\n${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
-          candidate.step = 'time';
+          await updateCandidate(phone, { step: 'time' });
+          responseText = `Please select a time slot for ${dateStr}:\n${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
         }
       } else {
-        response = 'Please select a valid date: 1 for today, 2 for tomorrow, or 3 for the day after.';
+        responseText = 'Please select a valid date: 1 for today, 2 for tomorrow, or 3 for the day after.';
       }
       break;
-    case 'time':
+    }
+
+    case 'time': {
       const availableSlots = getAvailableTimeSlots(candidate.interviewDate);
       const timeIndex = parseInt(message) - 1;
       if (timeIndex >= 0 && timeIndex < availableSlots.length) {
         const selectedSlot = availableSlots[timeIndex];
         if (!bookedTimeSlots[candidate.interviewDate]?.includes(selectedSlot)) {
-          candidate.interviewTime = selectedSlot;
-          if (!bookedTimeSlots[candidate.interviewDate]) {
-            bookedTimeSlots[candidate.interviewDate] = [];
-          }
-          bookedTimeSlots[candidate.interviewDate].push(candidate.interviewTime);
+          if (!bookedTimeSlots[candidate.interviewDate]) bookedTimeSlots[candidate.interviewDate] = [];
+          bookedTimeSlots[candidate.interviewDate].push(selectedSlot);
           const nextDesignation = getNextDesignation(candidate.department, candidate.subDepartment, candidate.section || candidate.subDepartment, candidate.designation);
-          candidate.status = `Scheduled for ${nextDesignation} (current: ${candidate.designation})`;
-          response = `Your interview is scheduled on ${candidate.interviewDate} at ${candidate.interviewTime}. Your current designation is ${candidate.designation} and you are scheduled for ${nextDesignation}. Please be on time. Thank you!`;
-          scheduleInterview(candidate);
-          candidate.step = 'question';
+          const newStatus = `Scheduled for ${nextDesignation} (current: ${candidate.designation})`;
+          await updateCandidate(phone, {
+            interviewTime: selectedSlot,
+            status: newStatus,
+            step: 'question',
+            totalQuestions: questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation]?.length || 0
+          });
+          // Re-read candidate from memory for scheduleInterview
+          const freshCandidate = candidates.find(c => c.phone === phone);
+          scheduleInterview(freshCandidate);
+          responseText = `Your interview is scheduled on ${candidate.interviewDate} at ${selectedSlot}. Your current designation is ${candidate.designation} and you are scheduled for ${nextDesignation}. Please be on time. Thank you!`;
         } else {
-          response = `Sorry, this time slot is no longer available. Please select another slot:\n${getAvailableTimeSlots(candidate.interviewDate).map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
+          responseText = `Sorry, this time slot is no longer available. Please select another slot:\n${getAvailableTimeSlots(candidate.interviewDate).map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
         }
       } else {
-        response = `Please select a valid time slot:\n${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
+        responseText = `Please select a valid time slot:\n${availableSlots.map((slot, i) => `${i + 1}. ${slot}`).join('\n')}`;
       }
       break;
+    }
+
     case 'question':
-      response = 'Your interview questions will be asked via a voice call at the scheduled time. Please be prepared to receive the call.';
-      candidate.step = 'done';
+      responseText = 'Your interview questions will be asked via a voice call at the scheduled time. Please be prepared to receive the call.';
+      await updateCandidate(phone, { step: 'done' });
       break;
+
     default:
-      response = 'Invalid input. Please start over.';
-      candidate.status = 'Failed';
-      candidate.step = 'done';
+      responseText = 'Invalid input. Please start over.';
+      await updateCandidate(phone, { status: 'Failed', step: 'done' });
   }
 
   try {
-    if (response) {
-      await client.messages.create({
-        body: response,
-        from: whatsappNumber,
-        to: from
-      });
-      console.log(`[WEBHOOK] Response sent to ${from}: ${response}`);
+    if (responseText) {
+      await client.messages.create({ body: responseText, from: whatsappNumber, to: from });
+      console.log(`[WEBHOOK] Response sent to ${from}: ${responseText}`);
     }
     res.status(200).send('OK');
   } catch (error) {
@@ -1396,10 +1307,11 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Results endpoint
-app.get('/results', (req, res) => {
+// Results endpoint — reads from MongoDB
+app.get('/results', async (req, res) => {
   try {
-    const results = candidates.map(candidate => ({
+    const dbCandidates = await Candidate.find({}).lean();
+    const results = dbCandidates.map(candidate => ({
       name: candidate.name,
       phone: candidate.phone,
       method: candidate.method,
@@ -1410,10 +1322,10 @@ app.get('/results', (req, res) => {
       subDepartment: candidate.subDepartment,
       section: candidate.section,
       designation: candidate.designation,
-      score: candidate.correctAnswers || 0,
-      totalQuestions: questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation]?.length || 0
+      score: candidate.score || 0,
+      totalQuestions: candidate.totalQuestions || questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation]?.length || 0
     }));
-    console.log('[RESULTS] Returning results:', JSON.stringify(results, null, 2));
+    console.log(`[RESULTS] Returning ${results.length} candidates from MongoDB`);
     res.json(results);
   } catch (error) {
     console.error('[RESULTS] Error:', error);
@@ -1424,30 +1336,19 @@ app.get('/results', (req, res) => {
 // Periodic result fetching every 30 seconds
 function fetchResultsPeriodically() {
   try {
-    const results = candidates.map(candidate => ({
-      name: candidate.name,
-      phone: candidate.phone,
-      method: candidate.method,
-      status: candidate.status,
-      interviewDate: candidate.interviewDate,
-      interviewTime: candidate.interviewTime,
-      department: candidate.department,
-      subDepartment: candidate.subDepartment,
-      section: candidate.section,
-      designation: candidate.designation,
-      score: candidate.correctAnswers || 0,
-      totalQuestions: questionBank[candidate.department]?.[candidate.subDepartment]?.[candidate.section || candidate.subDepartment]?.[candidate.designation]?.length || 0
-    }));
-    console.log('[PERIODIC-RESULTS] Fetched results at', new Date().toISOString(), ':', JSON.stringify(results, null, 2));
+    console.log('[PERIODIC-RESULTS] In-memory candidates at', new Date().toISOString(), ':', candidates.length);
   } catch (error) {
-    console.error('[PERIODIC-RESULTS] Error fetching results:', error);
+    console.error('[PERIODIC-RESULTS] Error:', error);
   }
 }
 
-// Start the server and periodic result fetching
+// ─────────────────────────────────────────────
+// START SERVER
+// ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Server is running on port ${PORT}`);
+  await loadCandidatesFromDB(); // Load existing candidates from MongoDB into memory
   setInterval(fetchResultsPeriodically, 30 * 1000);
   fetchResultsPeriodically();
 });
